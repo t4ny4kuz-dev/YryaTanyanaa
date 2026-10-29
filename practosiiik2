@@ -1,1 +1,196 @@
+#!/usr/bin/env python3
+"""Эмулятор языка оболочки UNIX-подобной ОС. Этап 1: REPL (GUI, заглушки команд)."""
 
+import getpass
+import socket
+import sys
+import tkinter as tk
+from tkinter import font as tkfont
+
+VFS_NAME = "vfs"  # имя виртуальной файловой системы (можно передать первым аргументом)
+USER = getpass.getuser()
+HOST = socket.gethostname()
+
+class ParseError(Exception):
+    """Ошибка разбора командной строки."""
+
+def parse_line(line: str) -> list[str]:
+    """Разбивает строку на аргументы с учётом кавычек.
+
+    - 'одинарные кавычки': всё внутри буквальное;
+    - "двойные кавычки": внутри работает экранирование \\" и \\\\;
+    - вне кавычек обратный слэш экранирует следующий символ;
+    - пустые кавычки "" дают пустой аргумент.
+    """
+    tokens: list[str] = []
+    cur: list[str] = []
+    in_token = False
+    quote = None
+    i = 0
+    n = len(line)
+
+    while i < n:
+        ch = line[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            else:
+                cur.append(ch)
+        elif quote == '"':
+            if ch == '"':
+                quote = None
+            elif ch == "\\" and i + 1 < n and line[i + 1] in '"\\$`':
+                i += 1
+                cur.append(line[i])
+            else:
+                cur.append(ch)
+        else:
+            if ch.isspace():
+                if in_token:
+                    tokens.append("".join(cur))
+                    cur, in_token = [], False
+            elif ch in "'\"":
+                quote = ch
+                in_token = True
+            elif ch == "\\":
+                if i + 1 < n:
+                    i += 1
+                    cur.append(line[i])
+                    in_token = True
+                else:
+                    raise ParseError("неожиданный конец строки после '\\'")
+            else:
+                cur.append(ch)
+                in_token = True
+        i += 1
+
+    if quote:
+        raise ParseError(f"не найдена закрывающая кавычка {quote}")
+    if in_token:
+        tokens.append("".join(cur))
+    return tokens
+
+class ShellApp:
+    def __init__(self, root: tk.Tk, vfs_name: str):
+        self.root = root
+        self.vfs_name = vfs_name
+        self.cwd = "/"
+        self.history: list[str] = []
+        self.hist_pos = 0
+
+        root.title(f"Эмулятор - [{USER}@{HOST}] VFS: {vfs_name}")
+        root.geometry("820x520")
+        root.configure(bg="#1e1e1e")
+
+        mono = tkfont.Font(family="Courier New", size=11)
+
+        self.output = tk.Text(
+            root, bg="#1e1e1e", fg="#d4d4d4", font=mono, wrap="word",
+            state="disabled", relief="flat", padx=8, pady=8,
+            insertbackground="#d4d4d4",
+        )
+        scroll = tk.Scrollbar(root, command=self.output.yview)
+        self.output.configure(yscrollcommand=scroll.set)
+        self.output.tag_configure("err", foreground="#f48771")
+        self.output.tag_configure("prompt", foreground="#6a9955")
+
+        bottom = tk.Frame(root, bg="#1e1e1e")
+        self.prompt_lbl = tk.Label(
+            bottom, text=self.prompt(), bg="#1e1e1e", fg="#6a9955", font=mono
+        )
+        self.entry = tk.Entry(
+            bottom, bg="#252526", fg="#d4d4d4", font=mono, relief="flat",
+            insertbackground="#d4d4d4",
+        )
+        self.prompt_lbl.pack(side="left", padx=(8, 0))
+        self.entry.pack(side="left", fill="x", expand=True, padx=8, pady=6)
+
+        bottom.pack(side="bottom", fill="x")
+        scroll.pack(side="right", fill="y")
+        self.output.pack(side="left", fill="both", expand=True)
+
+        self.entry.bind("<Return>", self.on_enter)
+        self.entry.bind("<Up>", self.on_up)
+        self.entry.bind("<Down>", self.on_down)
+        self.entry.focus_set()
+
+        self.write(f"Добро пожаловать в эмулятор оболочки (VFS: {vfs_name}).\n")
+        self.write("Доступные команды: ls, cd, exit. Для выхода введите exit.\n")
+
+    # ---------- вывод ----------
+    def prompt(self) -> str:
+        path = "~" if self.cwd == "/" else self.cwd
+        return f"{USER}@{HOST}:{path}$"
+
+    def write(self, text: str, tag: str | None = None):
+self.output.configure(state="normal")
+        self.output.insert("end", text, tag)
+        self.output.configure(state="disabled")
+        self.output.see("end")
+
+    # ---------- ввод ----------
+    def on_enter(self, _event=None):
+        line = self.entry.get()
+        self.entry.delete(0, "end")
+        self.write(f"{self.prompt()} ", "prompt")
+        self.write(line + "\n")
+        if line.strip():
+            self.history.append(line)
+        self.hist_pos = len(self.history)
+        self.execute(line)
+        self.prompt_lbl.configure(text=self.prompt())
+
+    def on_up(self, _event=None):
+        if self.history and self.hist_pos > 0:
+            self.hist_pos -= 1
+            self.entry.delete(0, "end")
+            self.entry.insert(0, self.history[self.hist_pos])
+        return "break"
+
+    def on_down(self, _event=None):
+        self.entry.delete(0, "end")
+        if self.hist_pos < len(self.history) - 1:
+            self.hist_pos += 1
+            self.entry.insert(0, self.history[self.hist_pos])
+        else:
+            self.hist_pos = len(self.history)
+        return "break"
+
+    # ---------- выполнение ----------
+    def execute(self, line: str):
+        try:
+            tokens = parse_line(line)
+        except ParseError as e:
+            self.write(f"ошибка разбора: {e}\n", "err")
+            return
+        if not tokens:
+            return
+
+        cmd, args = tokens[0], tokens[1:]
+        handler = {"ls": self.cmd_ls, "cd": self.cmd_cd, "exit": self.cmd_exit}.get(cmd)
+        if handler is None:
+            self.write(f"{cmd}: команда не найдена\n", "err")
+            return
+        handler(args)
+
+    # ---------- команды-заглушки ----------
+    def cmd_ls(self, args: list[str]):
+        self.write(f"ls: args={args}\n")
+
+    def cmd_cd(self, args: list[str]):
+        if len(args) > 1:
+            self.write("cd: слишком много аргументов\n", "err")
+            return
+        self.write(f"cd: args={args}\n")
+
+    def cmd_exit(self, args: list[str]):
+        self.root.destroy()
+
+def main():
+    vfs_name = sys.argv[1] if len(sys.argv) > 1 else VFS_NAME
+    root = tk.Tk()
+    ShellApp(root, vfs_name)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
