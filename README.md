@@ -123,3 +123,74 @@ class ShellApp:
         return f"{USER}@{HOST}:{path}$"
 
     def write(self, text: str, tag: str | None = None):
+    self.output.configure(state="normal")
+        self.output.insert("end", text, tag)
+        self.output.configure(state="disabled")
+        self.output.see("end")
+
+    # ---------- ввод ----------
+    def on_enter(self, _event=None):
+        line = self.entry.get()
+        self.entry.delete(0, "end")
+        self.write(f"{self.prompt()} ", "prompt")
+        self.write(line + "\n")
+        if line.strip():
+            self.history.append(line)
+        self.hist_pos = len(self.history)
+        self.execute(line)
+        self.prompt_lbl.configure(text=self.prompt())
+
+    def on_up(self, _event=None):
+        if self.history and self.hist_pos > 0:
+            self.hist_pos -= 1
+            self.entry.delete(0, "end")
+            self.entry.insert(0, self.history[self.hist_pos])
+        return "break"
+
+    def on_down(self, _event=None):
+        self.entry.delete(0, "end")
+        if self.hist_pos < len(self.history) - 1:
+            self.hist_pos += 1
+            self.entry.insert(0, self.history[self.hist_pos])
+        else:
+            self.hist_pos = len(self.history)
+        return "break"
+
+    # ---------- выполнение ----------
+    def execute(self, line: str):
+        try:
+            tokens = parse_line(line)
+        except ParseError as e:
+            self.write(f"ошибка разбора: {e}\n", "err")
+            return
+        if not tokens:
+            return
+
+        cmd, args = tokens[0], tokens[1:]
+        handler = {"ls": self.cmd_ls, "cd": self.cmd_cd, "exit": self.cmd_exit}.get(cmd)
+        if handler is None:
+            self.write(f"{cmd}: команда не найдена\n", "err")
+            return
+        handler(args)
+
+    # ---------- команды-заглушки ----------
+    def cmd_ls(self, args: list[str]):
+        self.write(f"ls: args={args}\n")
+
+    def cmd_cd(self, args: list[str]):
+        if len(args) > 1:
+            self.write("cd: слишком много аргументов\n", "err")
+            return
+        self.write(f"cd: args={args}\n")
+
+    def cmd_exit(self, args: list[str]):
+        self.root.destroy()
+
+def main():
+    vfs_name = sys.argv[1] if len(sys.argv) > 1 else VFS_NAME
+    root = tk.Tk()
+    ShellApp(root, vfs_name)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
